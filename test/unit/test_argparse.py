@@ -5,7 +5,7 @@ import shlex
 
 class MyArgParse(ArgParse):
     def define_options(self):
-        self.add_menu(keep_remainder=True)
+        self.add_cmd(keep_remainder=True)
         self.add_args([
             {
                 'name': 'hi',
@@ -15,8 +15,9 @@ class MyArgParse(ArgParse):
             }
         ])
 
-        self.add_menu('vpic run',
-                      keep_remainder=False)
+        self.add_cmd('vpic run',
+                      keep_remainder=False,
+                      aliases=['vpic r', 'vpic runner'])
         self.add_args([
             {
                 'name': 'steps',
@@ -24,6 +25,8 @@ class MyArgParse(ArgParse):
                 'type': int,
                 'required': True,
                 'pos': True,
+                'class': 'sim',
+                'rank': 0
             },
             {
                 'name': 'x',
@@ -32,6 +35,8 @@ class MyArgParse(ArgParse):
                 'required': False,
                 'default': 256,
                 'pos': True,
+                'class': 'sim',
+                'rank': 1
             },
             {
                 'name': 'do_io',
@@ -63,7 +68,8 @@ class MyArgParse(ArgParse):
                         'msg': 'A string representing a host',
                         'type': str,
                     }
-                ]
+                ],
+                'aliases': ['x']
             },
             {
                 'name': 'devices',
@@ -135,6 +141,16 @@ class TestArgparse(TestCase):
         self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
 
     def test_list_arg2(self):
+        args = MyArgParse(args='vpic run 15 --hosts=129.15 --hosts=1294.124')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
+
+    def test_list_arg3(self):
+        args = MyArgParse(args='vpic run 15 --hosts=129.15 --hosts=1294.124 --hosts=')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual([], args.kwargs['hosts'])
+
+    def test_list_arg4(self):
         args = MyArgParse(args='vpic run 15 --hosts=[]')
         self.assertEqual(15, args.kwargs['steps'])
         self.assertEqual([], args.kwargs['hosts'])
@@ -144,3 +160,21 @@ class TestArgparse(TestCase):
                                '--devices=\"[[nvme, 5], [sata, 25]]\"')
         self.assertEqual(15, args.kwargs['steps'])
         self.assertEqual([['nvme', 5], ['sata', 25]], args.kwargs['devices'])
+
+    def test_arg_alias(self):
+        args = MyArgParse(args='vpic run 15 -hosts=129.15 -hosts=1294.124')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
+
+        args = MyArgParse(args='vpic run 15 -x=129.15 -x=1294.124')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
+
+    def test_menu_alias(self):
+        args = MyArgParse(args='vpic run 15 -hosts=129.15 -hosts=1294.124')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
+
+        args = MyArgParse(args='vpic r 15 -x=129.15 -x=1294.124')
+        self.assertEqual(15, args.kwargs['steps'])
+        self.assertEqual(['129.15', '1294.124'], args.kwargs['hosts'])
