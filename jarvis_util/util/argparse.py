@@ -10,18 +10,60 @@ import yaml
 from tabulate import tabulate
 
 
-class MenuSequence:
-    def __init__(self, alias_toks):
-        self.alias = alias_toks
-        self.hash = 0
-        for tok in alias_toks:
-            self.hash += hash(tok)
+class PatternTree:
+    def __init__(self):
+        self.pattern = {}
 
-    def __hash__(self):
-        return self.hash
+    def add_menu(self, menu):
+        alias_to = None
+        if len(menu['name_toks']) == 0:
+            self.pattern['__menu'] = menu
+            return
+        for alias_str, alias_toks in menu['aliases']:
+            alias_to = self._add_menu(menu, self.pattern, alias_toks, alias_to)
 
-    def __eq__(self, other):
-        return other.alias == self.alias
+    def _add_menu(self, menu, pattern, toks, alias_to):
+        tok = toks[0]
+        if tok not in pattern:
+            if len(toks) == 1 and alias_to is not None:
+                pattern[tok] = alias_to
+            else:
+                pattern[tok] = {}
+        if len(toks) == 1:
+            pattern[tok]['__menu'] = menu
+            return pattern[tok]
+        self._add_menu(menu, pattern[tok], toks[1:], alias_to)
+
+    def get_default_menu(self):
+        if '__menu' in self.pattern:
+            return self.pattern['__menu']
+        return None
+
+    def match_pattern(self, toks):
+        if len(toks) == 0 and '__menu' in self.pattern:
+            return (0, self.pattern)
+        return self._match_pattern(toks, self.pattern, 0)
+
+    def _match_pattern(self, toks, pattern, depth, last_match=(0, None)):
+        if len(toks) == 0:
+            return last_match
+        tok = toks[0]
+        if tok in pattern:
+            if '__menu' in pattern[tok]:
+                last_match = (depth + 1, pattern[tok])
+            last_match = self._match_pattern(
+                toks[1:], pattern[tok], depth + 1, last_match)
+        return last_match
+
+    @staticmethod
+    def get_matches(menus):
+        matches = {}
+        for tok, pattern in menus.items():
+            if tok != '__menu' and '__menu' in pattern:
+                menu = pattern['__menu']
+                matches[menu['name_str']] = menu
+        matches = list(matches.values())
+        return matches
 
 
 class ArgParse(ABC):
@@ -47,7 +89,7 @@ class ArgParse(ABC):
         self.error = None
         self.exit_on_fail = exit_on_fail
         self.custom_info = custom_info
-        self.menus = []
+        self.menus = PatternTree()
         self.vars = {}
         self.remainder = []
         self.remainder_kv = {}
@@ -57,8 +99,7 @@ class ArgParse(ABC):
 
         self.needed_help = False
         self.menu = None
-        self.menu_name = None
-        self.menu_alias = None
+        self.cmd = None
         self.kwargs = {}
         self.real_kwargs = {}
         self.define_options()
@@ -132,12 +173,11 @@ class ArgParse(ABC):
         """
         toks = []
         name_str, name_toks = self._get_alias(name)
-        full_aliases = []
+        full_aliases = [(name_str, name_toks)]
         if aliases is None:
             aliases = []
         for alias in aliases:
             full_aliases.append(self._get_alias(alias))
-        full_aliases.append((name_str, name_toks))
         menu = {
                 'name_str': name_str,
                 'name_toks': name_toks,
@@ -148,10 +188,10 @@ class ArgParse(ABC):
                 'keep_remainder': keep_remainder,
                 'remainder_as_kv': remainder_as_kv,
                 'is_cmd': is_cmd,
+                'aliases': full_aliases
             }
-        for alias in full_aliases:
-            self.menus.append((alias, menu))
-        self.menu = self.menus[-1][1]
+        self.menus.add_menu(menu)
+        self.menu = menu
 
     @staticmethod
     def _default_arg_list_params(args):
@@ -273,25 +313,27 @@ class ArgParse(ABC):
         Determine which menu is used in the CLI.
 
         :return: Modify self.menu. No return value.
-        """
 
-        # Sort by longest menu length
-        self.menus.sort(key=lambda x: len(x[0][1]), reverse=True)
+        # Find the commands matching the first letter
+        """
         # Identify the menu we are currently under
         self.menu = None
-        for alias, menu in self.menus:
-            menu_name_toks = alias[1]
-            if len(menu_name_toks) > len(self.args):
-                continue
-            if not menu['is_cmd']:
-                continue
-            if menu_name_toks == self.args[0:len(menu_name_toks)]:
-                self.menu = menu
-                self.menu_alias = alias
-                self.args = self.args[len(menu_name_toks):]
-                break
-        if self.menu is None:
-            self._invalid_menu(self.args)
+        # Filter out matches
+        depth, menus = self.menus.match_pattern(self.args)
+        # If there was nothing remotely close, try default menu
+        if menus is None:
+            self.menu = self.menus.get_default_menu()
+        else:
+            self.menu = menus['__menu']
+            self.args = self.args[depth:]
+        # If there was nothing at all, error now
+        if self.menu is None or not self.menu['is_cmd']:
+            if menus is not None:
+                matches = [self.menu]
+                matches += PatternTree.get_matches(menus)
+            else:
+                matches = []
+            self._invalid_menu(matches)
         self.menu_name = self.menu['name_str']
         self.keep_remainder = self.menu['keep_remainder']
         self.remainder_as_kv = self.menu['remainder_as_kv']
@@ -477,9 +519,8 @@ class ArgParse(ABC):
         opt_name = opt_name.replace('-', '')
         return opt_name
 
-    def _invalid_menu(self, menu_name):
-        self._print_error(f'Could not find a menu for {menu_name}',
-                          bad_menu=menu_name)
+    def _invalid_menu(self, matches):
+        self._print_error('', matches=matches)
 
     def _invalid_choice(self, opt_name, arg):
         self._print_menu_error(f'{opt_name}={arg} is not a valid choice')
@@ -501,78 +542,74 @@ class ArgParse(ABC):
         self._print_error(f'In the menu {self.menu["name_str"]}, {msg}')
 
     def _print_error(self, msg,
-                     bad_menu=None):
-        print(f'{msg}')
-        self._print_help(bad_menu)
+                     matches=None):
+        if len(msg):
+            print(f'{msg}')
+        self._print_help(matches)
         if self.exit_on_fail:
             sys.exit(1)
         else:
             raise Exception(msg)
 
     def _print_help(self,
-                    bad_menu=None):
+                    matches=None):
         self.needed_help = True
-        if self.menu is not None:
+        if matches is None:
             self._print_menu_help()
         else:
-            self._print_menus(bad_menu)
+            self._print_menus(matches)
 
-    def _lcs(self, bad_menu):
-        menus = {MenuSequence(alias[1]): len(alias[1])
-                 for alias, menu in self.menus}
-        for i in range(len(bad_menu)):
-            seq = MenuSequence(bad_menu[0:i+1])
-            if seq not in menus:
-                return i
-        return 1
+    def _print_menus(self, matches):
+        """
+        Print a set of menus that were closest to the user's input
 
-    def _print_menus(self, bad_menu):
-        # Longest matching subsequence
-        lcs_len = self._lcs(bad_menu)
-        menus = list(self.menus)
-        menus.sort(key=lambda x: len(x[0][1]))
-        if len(bad_menu) == 0:
-            for alias, menu in menus:
+        :param matches: The set of menu matches
+        :return:
+        """
+        if len(matches) == 0:
+            menus = []
+            if len(self.menus.pattern):
+                menus = PatternTree.get_matches(self.menus.pattern)
+            for menu in menus:
                 self.menu = menu
-                self.menu_alias = alias
-                if len(alias[1]) != 1:
-                    continue
-                self._print_menu_help(True)
+                self._print_menu_help(True, max_len=1)
         else:
-            for alias, menu in menus:
+            for menu in matches:
                 self.menu = menu
-                self.menu_alias = alias
-                if len(alias[1]) < lcs_len or len(alias[1]) > lcs_len + 2:
-                    continue
-                if alias[1][0:lcs_len] == bad_menu[0:lcs_len]:
-                    self._print_menu_help(True)
+                self._print_menu_help(True)
 
-    def _print_menu_help(self, only_usage=False):
+    def _print_menu_help(self, only_usage=False, alias=None, max_len=100):
+        if self.menu is None:
+            return
         if not self.menu['is_cmd']:
-            print(f'MENU: {self.binary_name} {self.menu_alias[0]}')
-            print(self.menu['msg'])
+            title = 'MENU'
+            for alias_str, alias_toks in self.menu['aliases']:
+                print(f'{title}: {self.binary_name} {alias_str}')
+                title = 'ALIAS'
+            if self.menu['msg'] is not None:
+                print(f'BRIEF: {self.menu["msg"]}')
             print()
             return
-
-        # Print usage menu
-        pos_args = []
-        for arg in self.menu['pos_opts']:
-            if arg['required']:
-                pos_args.append(f'[{arg["name"]}]')
-            else:
-                pos_args.append(f'[{arg["name"]} (opt)]')
-        pos_args = ' '.join(pos_args)
-        if self.menu is not None:
-            menu_str = self.menu_alias[0]
-        if len(self.menu['kw_opts']):
-            print(f'COMMAND: {self.binary_name} {menu_str} {pos_args} ...')
         else:
-            print(f'COMMAND: {self.binary_name} {menu_str} {pos_args}')
-        if self.menu['msg'] is not None:
-            print(self.menu['msg'])
-        if self.menu['name_str'] != self.menu_alias[0]:
-            print(f'This is an alias to {self.menu["name_str"]}')
-        print()
+            # Print usage menu
+            pos_args = []
+            for arg in self.menu['pos_opts']:
+                if arg['required']:
+                    pos_args.append(f'[{arg["name"]}]')
+                else:
+                    pos_args.append(f'[{arg["name"]} (opt)]')
+            pos_args = ' '.join(pos_args)
+            title = 'COMMAND'
+            for alias_str, alias_toks in self.menu['aliases']:
+                menu_str = alias_str
+                if len(self.menu['kw_opts']):
+                    print(f'{title}: {self.binary_name} {menu_str} {pos_args} ...')
+                else:
+                    print(f'{title}: {self.binary_name} {menu_str} {pos_args}')
+                title = 'ALIAS'
+            if self.menu['msg'] is not None:
+                print(f'BRIEF: {self.menu["msg"]}')
+            print()
         if only_usage:
             return
 
@@ -609,7 +646,7 @@ class ArgParse(ABC):
                 name_set = ','.join(names)
                 table.append(
                     [name_set, default, self._get_type(arg), arg['msg']])
-            print(tabulate(table, headers=headers))
+            print(tabulate(table, headers=headers, tablefmt="simple"))
             print()
 
     def _get_type(self, arg):
@@ -617,3 +654,11 @@ class ArgParse(ABC):
             return str([self._get_type(subarg) for subarg in arg['args']])
         else:
             return str(arg['type']).split("'")[1]
+
+    @staticmethod
+    def _calculate_column_widths(fractions):
+        terminal_width = os.get_terminal_size().columns
+        total_fractions = sum(fractions)
+        return [int(terminal_width * (fraction / total_fractions)) for fraction
+                in fractions]
+
